@@ -15,6 +15,7 @@ var RESPAWN_SECONDS = 20;
 var steer = {target: null};
 var shipUnit = null;
 var shipRespawnAt = 0;
+var shipEnabled = false;
 var moveVec = new Vec2();
 
 var shipController = extend(AIController, {
@@ -189,6 +190,18 @@ function normalize(value){
 
 // ---------------------------------------------------------------- ship
 
+// The ship only auto-spawns in Ground Zero, so loading other sectors or saves
+// never adds modded content to them. The agent can still spawn it anywhere
+// through the spawn_ship op.
+function sectorIsGroundZero(){
+    try{
+        var sector = Vars.state.getSector();
+        return sector != null && sector.preset != null && sector.preset.name === "groundZero";
+    }catch(e){
+        return false;
+    }
+}
+
 function spawnShip(){
     try{
         if(!Vars.state.isGame()) return null;
@@ -213,7 +226,9 @@ function spawnShip(){
 
         shipUnit = shipType.spawn(team, x, y);
         try{ shipUnit.controller(shipController); }catch(e){ }
+        try{ shipController.unit(shipUnit); }catch(e){ }
         steer.target = null;
+        shipEnabled = true;
         return shipUnit;
     }catch(err){
         print("[ai-ship] spawn failed: " + err);
@@ -223,6 +238,8 @@ function spawnShip(){
 
 function ensureShip(){
     if(!Vars.state.isGame()) return;
+    if(!shipEnabled && sectorIsGroundZero()) shipEnabled = true;
+    if(!shipEnabled) return;
     if(shipUnit != null && shipUnit.isAdded()) return;
 
     if(shipRespawnAt <= 0){
@@ -270,20 +287,12 @@ function snapshot(){
     }
     out.cores = cores;
 
-    // everything the AI has built (it always knows its own base)
-    var own = [];
-    for(var i = 0; i < data.buildings.size && i < 3000; i++){
-        var b = data.buildings.get(i);
-        var pos = tileOf(b);
-        own.push({b: b.block.name, x: pos.x, y: pos.y, rot: b.rotation});
-    }
-    out.own = own;
-
     // ship
-    var ship = {alive: false, respawnAt: shipRespawnAt > 0 ? shipRespawnAt : null};
+    var ship = {alive: false, enabled: shipEnabled, respawnAt: shipRespawnAt > 0 ? shipRespawnAt : null};
     if(shipUnit != null && shipUnit.isAdded()){
         ship = {
             alive: true,
+            enabled: shipEnabled,
             x: shipUnit.x,
             y: shipUnit.y,
             health: shipUnit.health,
@@ -299,6 +308,20 @@ function snapshot(){
     // only what the ship can actually see
     var vx = ship.alive ? ship.x : (Vars.player != null ? Vars.player.x : 0);
     var vy = ship.alive ? ship.y : (Vars.player != null ? Vars.player.y : 0);
+
+    // own team's buildings the ship can see (plus everything within build range)
+    var own = [];
+    var ownRange = VISION_RANGE * VISION_RANGE;
+    for(var i = 0; i < data.buildings.size && i < 3000; i++){
+        var b = data.buildings.get(i);
+        if(b == null || b.block == null) continue;
+        var pos = tileOf(b);
+        var bx = (pos.x + 0.5) * 8 - vx, by = (pos.y + 0.5) * 8 - vy;
+        if(bx * bx + by * by > ownRange) continue;
+        own.push({b: b.block.name, x: pos.x, y: pos.y, rot: b.rotation});
+    }
+    out.own = own;
+
     var radius = Math.ceil(VISION_RANGE / 8);
     var cx = Math.floor(vx / 8), cy = Math.floor(vy / 8);
     var minX = Math.max(0, cx - radius), maxX = Math.min(Vars.world.width() - 1, cx + radius);
@@ -653,8 +676,11 @@ Events.on(WorldLoadEvent, function(){
     steer.target = null;
     shipUnit = null;
     shipRespawnAt = 0;
+    shipEnabled = sectorIsGroundZero();
+    if(!shipEnabled) return;
+
     Core.app.post(run(function(){
-        spawnShip();
+        if(shipEnabled) spawnShip();
     }));
 });
 

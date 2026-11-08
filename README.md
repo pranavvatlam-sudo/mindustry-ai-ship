@@ -20,6 +20,10 @@ Mindustry (Google Play Games Android VM)
 Milestone **M0**: link, snapshot, eval. The ship spawns next to your core,
 reports only what its sensors can see, and can be steered.
 
+It auto-spawns only in **Ground Zero** (`sector.preset.name == "groundZero"`), so
+loading your other sectors does not add modded units to them. Anywhere else, the
+agent can create it with the `spawn_ship` op.
+
 ## Repo layout
 
 ```
