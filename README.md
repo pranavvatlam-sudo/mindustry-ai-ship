@@ -66,9 +66,13 @@ connection you should see a hello, a snapshot summary, and (optionally) an eval.
 Useful flags:
 
 ```powershell
+python -m ai_ship.probe --backup            # copy saves/ before touching a sector
+python -m ai_ship.probe --spawn             # spawn the ship in the current game
 python -m ai_ship.probe --eval "Vars.state.wave"
 python -m ai_ship.probe --chat "AI Ship online"
 ```
+
+The flags can be combined, e.g. `--backup --spawn`.
 
 ### Networking
 
@@ -88,12 +92,15 @@ private networks.
 from inside the VM:
 
 ```powershell
-python -m ai_ship.probe --eval "backupSaves()"
+python -m ai_ship.probe --backup
 ```
 
-This copies `saves/` to `saves-ai-backup/` in the game's data directory. Do this
-**before** entering a campaign sector if you care about the existing progress
-for that sector.
+(or `--eval "backupSaves()"`). This copies `saves/` to `saves-ai-backup/` in the
+game's data directory. Do this **before** entering a campaign sector if you care
+about the existing progress for that sector.
+
+The ship auto-spawns only in Ground Zero. Saves for other sectors are never
+given modded units unless you explicitly run `--spawn` there.
 
 ## Developing the mod
 

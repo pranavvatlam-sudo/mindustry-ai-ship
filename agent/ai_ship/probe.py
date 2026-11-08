@@ -93,6 +93,14 @@ async def run(args: argparse.Namespace) -> int:
         pong = await bridge.ping()
         print("ping:", pong)
 
+        if args.backup:
+            result = await bridge.request("backup")
+            print("\nsave backup:", result)
+
+        if args.spawn:
+            spawned = await bridge.request("spawn_ship")
+            print("\nship spawned:", spawned)
+
         snap = await bridge.snapshot()
         print("\n--- snapshot ---")
         print(summarize(snap))
@@ -118,6 +126,8 @@ def main() -> int:
     parser.add_argument("--wait", type=float, default=300.0, help="seconds to wait for the mod")
     parser.add_argument("--eval", default="", help="JS expression to run in the game")
     parser.add_argument("--chat", default="", help="message to post in the game chat")
+    parser.add_argument("--spawn", action="store_true", help="spawn the AI ship in the current game")
+    parser.add_argument("--backup", action="store_true", help="back up the game's saves folder first")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
