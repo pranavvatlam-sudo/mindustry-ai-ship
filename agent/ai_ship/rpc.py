@@ -14,6 +14,10 @@ from typing import Any
 
 log = logging.getLogger("ai_ship.rpc")
 
+# A world snapshot is one JSON line and can easily exceed asyncio's default
+# 64 KiB StreamReader limit. Keep plenty of headroom for the whole vision grid.
+MAX_LINE = 16 * 1024 * 1024
+
 
 class BridgeError(RuntimeError):
     """Raised when a request fails or the link is down."""
@@ -41,7 +45,9 @@ class Bridge:
     # ------------------------------------------------------------------ server
 
     async def start(self) -> None:
-        self._server = await asyncio.start_server(self._handle, self.host, self.port)
+        self._server = await asyncio.start_server(
+            self._handle, self.host, self.port, limit=MAX_LINE
+        )
         log.info("bridge listening on %s:%s", self.host, self.port)
 
     async def stop(self) -> None:
@@ -106,7 +112,7 @@ class Bridge:
                     fut.set_result(msg)
                 else:
                     log.debug("unmatched message: %s", msg)
-        except (ConnectionError, asyncio.IncompleteReadError) as exc:
+        except (ConnectionError, asyncio.IncompleteReadError, ValueError) as exc:
             log.info("session ended: %s", exc)
         finally:
             if self._session is not None and self._session.reader is reader:

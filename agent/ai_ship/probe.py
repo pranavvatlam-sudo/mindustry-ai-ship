@@ -36,7 +36,17 @@ def summarize(snap: dict) -> str:
     cores = snap.get("cores") or []
     for i, core in enumerate(cores):
         items = ", ".join(f"{k}={v}" for k, v in sorted(core.get("items", {}).items()))
-        lines.append(f"core[{i}] tile=({core.get('x')},{core.get('y')}) hp={core.get('health')} items=[{items}]")
+        lines.append(
+            "core[{}] tile=({},{}) world=({:.0f},{:.0f}) hp={} items=[{}]".format(
+                i,
+                core.get("tx"),
+                core.get("ty"),
+                core.get("x", 0),
+                core.get("y", 0),
+                core.get("health"),
+                items,
+            )
+        )
 
     ship = snap.get("ship") or {}
     if ship.get("alive"):
@@ -52,6 +62,9 @@ def summarize(snap: dict) -> str:
         )
     else:
         lines.append(f"ship=dead respawn_in={ship.get('respawnAt')}")
+
+    if "shipCount" in snap:
+        lines.append(f"ships_in_world={snap.get('shipCount')} enabled={ship.get('enabled')}")
 
     ores = snap.get("ores") or []
     counts: dict[str, int] = {}

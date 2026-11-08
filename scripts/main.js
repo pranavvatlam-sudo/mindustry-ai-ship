@@ -24,7 +24,11 @@ var shipController = extend(AIController, {
         if(u == null || !u.isAdded()) return;
 
         var t = steer.target;
-        if(t == null) return;
+        if(t == null){
+            // idle: kill any residual velocity so the ship stays put
+            u.vel().setZero();
+            return;
+        }
 
         var dx = t.x - u.x, dy = t.y - u.y;
         var dist = Math.sqrt(dx * dx + dy * dy);
@@ -70,8 +74,6 @@ shipType.hitSize = 15;
 shipType.rotateSpeed = 6.5;
 shipType.omniMovement = true;
 shipType.faceTarget = true;
-shipType.targetAir = true;
-shipType.targetGround = true;
 shipType.buildSpeed = 2.5;
 shipType.buildRange = 240;
 shipType.mineSpeed = 1.5;
@@ -80,6 +82,12 @@ shipType.itemCapacity = 60;
 shipType.engineOffset = 9;
 shipType.engineSize = 3.2;
 shipType.playerControllable = false;
+// stay passive until the external agent arms it
+shipType.targetAir = false;
+shipType.targetGround = false;
+// mod sprites are prefixed with the mod name, so the weapon region is
+// "<unit type name>-weapon" == "ai-ship-ai-ship-weapon"
+shipWeapon.name = shipType.name + "-weapon";
 shipType.weapons.add(shipWeapon);
 shipType.controller = func(function(u){ return shipController; });
 
@@ -202,6 +210,44 @@ function sectorIsGroundZero(){
     }
 }
 
+function shipsOf(team){
+    var out = [];
+    try{
+        var units = team.data().units;
+        for(var i = 0; i < units.size; i++){
+            var u = units.get(i);
+            // mod content names are prefixed (ai-ship-ai-ship), and comparing
+            // the numeric content id is the same on every platform
+            if(u != null && u.isAdded() && u.type.id === shipType.id) out.push(u);
+        }
+    }catch(e){ }
+    return out;
+}
+
+// Keeps exactly one ship alive: the one with id `keep`, or none when keep is null.
+function pruneShips(keep){
+    var all = shipsOf(gameTeam());
+    for(var i = 0; i < all.length; i++){
+        var u = all[i];
+        if(keep != null && u.id === keep.id) continue;
+        try{ u.remove(); }catch(e){ }
+    }
+}
+
+// Reuses a ship that already exists in the world (for example one loaded from
+// a save) instead of spawning a second one.
+function adoptShip(){
+    var all = shipsOf(gameTeam());
+    if(all.length === 0) return false;
+
+    shipUnit = all[0];
+    pruneShips(shipUnit);
+    try{ shipUnit.controller(shipController); }catch(e){ }
+    try{ shipController.unit(shipUnit); }catch(e){ }
+    steer.target = null;
+    return true;
+}
+
 function spawnShip(){
     try{
         if(!Vars.state.isGame()) return null;
@@ -222,11 +268,13 @@ function spawnShip(){
             y = Vars.world.height() * 4;
         }
 
-        if(shipUnit != null && shipUnit.isAdded()) shipUnit.remove();
+        // replace any existing ship(s) so there is never more than one
+        pruneShips(null);
 
         shipUnit = shipType.spawn(team, x, y);
         try{ shipUnit.controller(shipController); }catch(e){ }
         try{ shipController.unit(shipUnit); }catch(e){ }
+        pruneShips(shipUnit);
         steer.target = null;
         shipEnabled = true;
         return shipUnit;
@@ -241,6 +289,9 @@ function ensureShip(){
     if(!shipEnabled && sectorIsGroundZero()) shipEnabled = true;
     if(!shipEnabled) return;
     if(shipUnit != null && shipUnit.isAdded()) return;
+
+    // pick up a ship that survived a save/load, and drop any duplicates
+    if(adoptShip()) return;
 
     if(shipRespawnAt <= 0){
         shipRespawnAt = Time.time + 2;
@@ -283,7 +334,15 @@ function snapshot(){
     var cores = [];
     for(var i = 0; i < data.cores.size; i++){
         var c = data.cores.get(i);
-        cores.push({x: c.x, y: c.y, health: c.health, maxHealth: c.maxHealth, items: itemMap(c.items)});
+        cores.push({
+            x: c.x,
+            y: c.y,
+            tx: c.tileX(),
+            ty: c.tileY(),
+            health: c.health,
+            maxHealth: c.maxHealth,
+            items: itemMap(c.items)
+        });
     }
     out.cores = cores;
 
@@ -303,6 +362,7 @@ function snapshot(){
         };
     }
     out.ship = ship;
+    out.shipCount = shipsOf(team).length;
     out.player = Vars.player != null ? {x: Vars.player.x, y: Vars.player.y} : null;
 
     // only what the ship can actually see
@@ -677,12 +737,8 @@ Events.on(WorldLoadEvent, function(){
     steer.target = null;
     shipUnit = null;
     shipRespawnAt = 0;
+    // ensureShip picks up a saved ship or spawns one ~2 seconds after the world loads
     shipEnabled = sectorIsGroundZero();
-    if(!shipEnabled) return;
-
-    Core.app.post(run(function(){
-        if(shipEnabled) spawnShip();
-    }));
 });
 
 Events.on(UnitDestroyEvent, function(event){
