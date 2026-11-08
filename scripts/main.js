@@ -287,11 +287,12 @@ function spawnShip(){
 function ensureShip(){
     if(!Vars.state.isGame()) return;
     if(!shipEnabled && sectorIsGroundZero()) shipEnabled = true;
-    if(!shipEnabled) return;
     if(shipUnit != null && shipUnit.isAdded()) return;
 
-    // pick up a ship that survived a save/load, and drop any duplicates
+    // pick up a ship that survived a save/load, and drop any duplicates,
+    // even in a sector that does not auto-spawn it
     if(adoptShip()) return;
+    if(!shipEnabled) return;
 
     if(shipRespawnAt <= 0){
         shipRespawnAt = Time.time + 2;
