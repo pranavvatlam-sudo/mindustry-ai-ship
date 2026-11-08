@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Local config / secrets
+.env
+*.key
+secrets.*
+
+# Runtime output
+*.log
+logs/
+runs/
+saves/
+*.msav
+*.msav.bak
+snapshots/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Sprite generator intermediate output
+tools/out/

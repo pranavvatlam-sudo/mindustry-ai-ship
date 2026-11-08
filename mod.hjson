@@ -1,0 +1,8 @@
+{
+  name: "ai-ship"
+  displayName: "AI Ship"
+  author: "pranavvatlam-sudo"
+  description: "External AI bridge. Spawns a companion craft that an outside planner can see through, steer, and build from. Development build."
+  version: "0.1.0"
+  minGameVersion: "146"
+}
