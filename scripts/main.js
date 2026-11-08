@@ -509,6 +509,7 @@ function copyTree(src, dst){
 function backupSaves(){
     var src = Vars.saveDirectory;
     var dst = Vars.dataDirectory.child("saves-ai-backup");
+    if(src == null || !src.exists()) return {path: dst.absolutePath(), files: 0, error: "no saves directory"};
     if(dst.exists()) dst.deleteDirectory();
     copyTree(src, dst);
     return {path: dst.absolutePath(), files: countFiles(dst)};
