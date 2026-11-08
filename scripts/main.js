@@ -1,7 +1,7 @@
 // AI Ship — a thin RPC bridge between Mindustry and an external agent.
 // The agent lives outside the game. This mod only observes, steers, and executes.
 
-var MOD_VERSION = "0.1.0";
+var MOD_VERSION = "0.1.1";
 var PORT = 8765;
 // 10.0.2.2 is the host loopback alias inside the Google Play Games Android VM.
 // The LAN address is the fallback if slirp forwarding is restricted.
@@ -17,30 +17,45 @@ var shipUnit = null;
 var shipRespawnAt = 0;
 var shipEnabled = false;
 var moveVec = new Vec2();
+var lastErrorText = null;
+
+// Rhino exceptions inside an update handler kill the whole game, so every
+// recurring hook runs through this and only logs each distinct error once.
+function noteError(where, err){
+    var text = "" + (err && err.message ? err.message : err);
+    if(text === lastErrorText) return;
+    lastErrorText = text;
+    print("[ai-ship] " + where + " error: " + text);
+}
 
 var shipController = extend(AIController, {
     updateMovement: function(){
-        var u = shipUnit;
-        if(u == null || !u.isAdded()) return;
+        try{
+            var u = shipUnit;
+            if(u == null || !u.isAdded()) return;
 
-        var t = steer.target;
-        if(t == null){
-            // idle: kill any residual velocity so the ship stays put
-            u.vel().setZero();
-            return;
+            var t = steer.target;
+            if(t == null){
+                // idle: kill any residual velocity so the ship stays put
+                u.vel.setZero();
+                return;
+            }
+
+            var dx = t.x - u.x, dy = t.y - u.y;
+            var dist = Math.sqrt(dx * dx + dy * dy);
+            if(dist < 3) return;
+
+            // ease off near the waypoint so it does not orbit it forever
+            var fac = Math.min(1, dist / 28);
+            var sp = u.speed() * fac;
+
+            moveVec.set(dx / dist * sp, dy / dist * sp);
+            u.movePref(moveVec);
+            u.lookAt(t);
+        }catch(err){
+            noteError("movement", err);
+            steer.target = null;
         }
-
-        var dx = t.x - u.x, dy = t.y - u.y;
-        var dist = Math.sqrt(dx * dx + dy * dy);
-        if(dist < 3) return;
-
-        // ease off near the waypoint so it does not orbit it forever
-        var fac = Math.min(1, dist / 28);
-        var sp = u.speed() * fac;
-
-        moveVec.set(dx / dist * sp, dy / dist * sp);
-        u.movePref(moveVec);
-        u.lookAt(t);
     }
 });
 
@@ -285,24 +300,28 @@ function spawnShip(){
 }
 
 function ensureShip(){
-    if(!Vars.state.isGame()) return;
-    if(!shipEnabled && sectorIsGroundZero()) shipEnabled = true;
-    if(shipUnit != null && shipUnit.isAdded()) return;
+    try{
+        if(!Vars.state.isGame()) return;
+        if(!shipEnabled && sectorIsGroundZero()) shipEnabled = true;
+        if(shipUnit != null && shipUnit.isAdded()) return;
 
-    // pick up a ship that survived a save/load, and drop any duplicates,
-    // even in a sector that does not auto-spawn it
-    if(adoptShip()) return;
-    if(!shipEnabled) return;
+        // pick up a ship that survived a save/load, and drop any duplicates,
+        // even in a sector that does not auto-spawn it
+        if(adoptShip()) return;
+        if(!shipEnabled) return;
 
-    if(shipRespawnAt <= 0){
-        shipRespawnAt = Time.time + 2;
-        return;
-    }
-    if(Time.time < shipRespawnAt) return;
+        if(shipRespawnAt <= 0){
+            shipRespawnAt = Time.time + 2;
+            return;
+        }
+        if(Time.time < shipRespawnAt) return;
 
-    shipRespawnAt = 0;
-    if(spawnShip() == null){
-        shipRespawnAt = Time.time + 10;
+        shipRespawnAt = 0;
+        if(spawnShip() == null){
+            shipRespawnAt = Time.time + 10;
+        }
+    }catch(err){
+        noteError("ensureShip", err);
     }
 }
 
@@ -731,22 +750,30 @@ function startBridge(){
 // ---------------------------------------------------------------- events
 
 Events.on(ClientLoadEvent, function(){
-    startBridge();
+    try{ startBridge(); }catch(err){ noteError("startBridge", err); }
 });
 
 Events.on(WorldLoadEvent, function(){
-    steer.target = null;
-    shipUnit = null;
-    shipRespawnAt = 0;
-    // ensureShip picks up a saved ship or spawns one ~2 seconds after the world loads
-    shipEnabled = sectorIsGroundZero();
+    try{
+        steer.target = null;
+        shipUnit = null;
+        shipRespawnAt = 0;
+        // ensureShip picks up a saved ship or spawns one ~2 seconds after the world loads
+        shipEnabled = sectorIsGroundZero();
+    }catch(err){
+        noteError("worldLoad", err);
+    }
 });
 
 Events.on(UnitDestroyEvent, function(event){
-    if(shipUnit != null && event.unit != null && event.unit.id === shipUnit.id){
-        shipUnit = null;
-        shipRespawnAt = Time.time + RESPAWN_SECONDS;
-        say("ship destroyed — rebuilding");
+    try{
+        if(shipUnit != null && event.unit != null && event.unit.id === shipUnit.id){
+            shipUnit = null;
+            shipRespawnAt = Time.time + RESPAWN_SECONDS;
+            say("ship destroyed — rebuilding");
+        }
+    }catch(err){
+        noteError("unitDestroy", err);
     }
 });
 
