@@ -1,5 +1,5 @@
-# The probe (M0) only uses the standard library.
-# These are for the planner / dashboard milestones.
+# The probe, memory, executor, and planner use only the standard library.
+# These are for the M4 dashboard.
 httpx>=0.27
 fastapi>=0.115
 uvicorn>=0.32

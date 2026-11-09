@@ -20,10 +20,15 @@ Mindustry (Google Play Games Android VM)
 Milestone **M0**: link, snapshot, eval — done.
 Milestone **M1**: perception memory — done. The agent accumulates ore tiles, blocks,
 enemy tracks, and explored tiles from vision snapshots; anything that leaves
-vision and was visible is forgotten (mined or destroyed). 16 unit tests pass.
+vision and was visible is forgotten (mined or destroyed).
+Milestone **M2**: executor — done. It places blocks with real item costs, moves
+the ship into range, confirms each placement, and refuses to demolish own
+buildings or cores.
+Milestone **M3**: planner — done. An OpenRouter model (or a deterministic
+heuristic fallback) proposes a short plan; a strict validator rejects anything
+unsafe before the executor sees it. 65 unit tests pass.
 
-Next: **M2** executor — drills → conveyors → core, Duo nests with ammo, paying real
-item costs.
+Next: **M4** dashboard and a full wave-10 Ground Zero run.
 
 It auto-spawns only in **Ground Zero** (`sector.preset.name == "groundZero"`), so
 loading your other sectors does not add modded units to them. Anywhere else, the
@@ -42,6 +47,7 @@ agent/ai_ship/rpc.py   JSON-lines bridge (server side)
 agent/ai_ship/probe.py M0 probe CLI
 agent/ai_ship/memory.py M1 perception memory + live watch
 agent/ai_ship/executor.py M2 build/drill/conveyor executor
+agent/ai_ship/planner.py M3 LLM/heuristic planner + safety validator
 agent/tests/           unit tests
 ```
 
@@ -83,6 +89,41 @@ python -m ai_ship.memory --once       # take one snapshot, save memory, and exit
 ```
 
 The flags can be combined, e.g. `--backup --spawn`.
+
+## Plan with the agent (M3)
+
+The planner turns a goal into a short list of steps. It is dry-run by default:
+
+```powershell
+# no game connection: use the last saved perception memory
+python -m ai_ship.planner --offline --heuristic
+
+# ask OpenRouter for a plan, still a dry run
+python -m ai_ship.planner --goal "Build a Duo turret near the ship, then hold"
+
+# execute a validated plan (spends real items)
+python -m ai_ship.planner --goal "..." --run --yes
+```
+
+Set `OPENROUTER_API_KEY` to use a model. `OPENROUTER_MODEL` (or `--model`)
+selects it; `--fallback-models` tries alternatives when a free provider is
+rate-limited. The heuristic fallback works without a key or network.
+
+Safety is enforced in code, not just in the prompt:
+
+- the planner cannot emit `break` or `pause` steps;
+- it cannot build within 2 tiles of any existing own building or the core
+  (`--margin` changes this, but the default is deliberately cautious);
+- a mechanical drill must sit on a known free ore tile, and no other block may
+  cover ore;
+- builds must be within 800 px of the ship, inside the map, and the plan is
+  capped at 20 steps;
+- the executor re-checks occupancy and range against the live game, so a stale
+  plan fails instead of overwriting something.
+
+Because the AI treats the whole existing base as protected, it will usually
+scout or build in open ground rather than thread a new conveyor through your
+current belts.
 
 ### Networking
 
@@ -157,6 +198,6 @@ Helpers available to `eval` inside the mod:
 
 1. ~~**M0** link, snapshot, ship spawned and steerable~~ — done
 2. ~~**M1** perception memory (explored grid), live watch, unit tests~~ — done
-3. ~~**M2** executor: drills → conveyors → core, Duo nests with ammo~~ — code complete, unit-tested, read-only live smoke test passed; live placements pending your go-ahead (they spend real items)
-4. **M3** planner: LLM goals, validated actions
+3. ~~**M2** executor: drills → conveyors → core, Duo nests with ammo~~ — done, including a live paid build in Ground Zero
+4. ~~**M3** planner: LLM goals, validated actions~~ — done; live calls depend on the OpenRouter free-tier quota, with an offline heuristic fallback
 5. **M4** dashboard, wave-10 Ground Zero run
