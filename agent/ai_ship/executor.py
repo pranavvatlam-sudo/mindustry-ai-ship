@@ -92,21 +92,20 @@ class Executor:
         return StepResult(op="hold", ok=True, ship=self.memory.ship)
 
     async def move_to(self, x: float, y: float, timeout: float = 30.0,
-                      within: float | None = None) -> StepResult:
+                      within: float = 4.0) -> StepResult:
         """Steer the ship toward world coords.
 
-        Returns ok when the ship has settled and (if ``within`` is given) is
-        within that distance of the target.
+        Returns ok as soon as the ship is within ``within`` pixels of the
+        target. The controller parks inside 3 px, so a small radius is enough;
+        requiring the ship to be perfectly still used to time out while it
+        hovered around the waypoint.
         """
         await self._eval(f"shipMove({x:.2f}, {y:.2f})")
 
         loop = asyncio.get_running_loop()
-        last: tuple[float, float] | None = None
-        stable_for = 0.0
         deadline = loop.time() + timeout
         while True:
-            now = loop.time()
-            if now >= deadline:
+            if loop.time() >= deadline:
                 return StepResult(op="move", ok=False, error="move timeout",
                                   ship=self.memory.ship)
             ship = await self._ship()
@@ -114,15 +113,9 @@ class Executor:
                 return StepResult(op="move", ok=False, error="ship died",
                                   ship=None)
             pos = (float(ship.get("x", 0.0)), float(ship.get("y", 0.0)))
-            in_range = within is None or math.hypot(pos[0] - x, pos[1] - y) <= within
-            if last is not None and math.hypot(pos[0] - last[0], pos[1] - last[1]) < 0.5:
-                stable_for += 0.5
-                if in_range and stable_for >= 2.0:
-                    return StepResult(op="move", ok=True, ship=self.memory.ship)
-            else:
-                stable_for = 0.0
-            last = pos
-            await asyncio.sleep(0.5)
+            if math.hypot(pos[0] - x, pos[1] - y) <= within:
+                return StepResult(op="move", ok=True, ship=self.memory.ship)
+            await asyncio.sleep(0.4)
 
     async def move_into_range(self, tx: int, ty: int, margin: float = 4.0) -> StepResult:
         """Move the ship until tile (tx, ty) is within build range."""
