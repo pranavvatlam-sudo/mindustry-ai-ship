@@ -3,20 +3,32 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import unittest
+from unittest.mock import patch
 
 from ai_ship.memory import WorldMemory
 from ai_ship.planner import (
+    AI_BASE_URL_ENV,
+    AI_PROVIDER_ENV,
     DEFAULT_MODEL,
+    OPENROUTER_URL,
+    PROVIDERS,
     FallbackPlanner,
     HeuristicPlanner,
     LLMPlanner,
     ModelFallbackTransport,
+    OpenRouterTransport,
+    OpenAICompatTransport,
     PlanValidationError,
     PlannerError,
     Policy,
+    build_transport,
     extract_content,
     parse_plan_json,
+    planner_models,
+    resolve_provider,
     validate_plan,
 )
 
@@ -409,6 +421,135 @@ class HeuristicTests(unittest.TestCase):
         policy = Policy()
         plan = HeuristicPlanner(policy).plan("mine", mem)
         validate_plan(plan.steps, mem, policy)
+
+
+class ProviderTests(unittest.TestCase):
+    def test_gemini_endpoint_is_openai_compatible(self):
+        transport = build_transport(PROVIDERS["gemini"], api_key="k")
+        self.assertEqual(
+            transport._endpoint(),
+            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+        )
+
+    def test_endpoint_accepts_a_full_chat_completions_url(self):
+        transport = build_transport(
+            PROVIDERS["openrouter"], api_key="k", base_url=OPENROUTER_URL
+        )
+        self.assertEqual(transport._endpoint(), OPENROUTER_URL)
+
+    def test_gemini_payload_asks_for_json(self):
+        transport = build_transport(PROVIDERS["gemini"], api_key="k")
+        payload = transport._payload([{"role": "user", "content": "hi"}])
+        self.assertEqual(payload["response_format"], {"type": "json_object"})
+        self.assertEqual(payload["reasoning_effort"], "low")
+        self.assertGreaterEqual(payload["max_tokens"], 4096)
+        self.assertNotIn("provider", payload)
+
+    def test_openrouter_payload_restricts_upstreams(self):
+        transport = build_transport(PROVIDERS["openrouter"], api_key="k")
+        payload = transport._payload([{"role": "user", "content": "hi"}])
+        self.assertEqual(payload["provider"], {"require_parameters": True})
+
+    def test_no_json_mode_drops_response_format(self):
+        transport = build_transport(PROVIDERS["gemini"], api_key="k", json_mode=False)
+        payload = transport._payload([{"role": "user", "content": "hi"}])
+        self.assertNotIn("response_format", payload)
+
+    def test_resolve_explicit_provider(self):
+        with patch.dict(os.environ, {AI_PROVIDER_ENV: "gemini"}, clear=True):
+            self.assertEqual(resolve_provider().name, "gemini")
+
+    def test_resolve_infers_from_key(self):
+        with patch.dict(os.environ, {"GROQ_API_KEY": "gsk"}, clear=True):
+            self.assertEqual(resolve_provider().name, "groq")
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "gk"}, clear=True):
+            self.assertEqual(resolve_provider().name, "gemini")
+
+    def test_resolve_custom_base_url(self):
+        with patch.dict(os.environ, {AI_BASE_URL_ENV: "http://box:8080/v1"}, clear=True):
+            self.assertEqual(resolve_provider().name, "custom")
+
+    def test_resolve_defaults_to_openrouter(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(resolve_provider().name, "openrouter")
+
+    def test_unknown_provider_is_rejected(self):
+        with patch.dict(os.environ, {AI_PROVIDER_ENV: "nope"}, clear=True):
+            with self.assertRaisesRegex(PlannerError, "unknown provider"):
+                resolve_provider()
+
+    def test_models_start_with_primary_then_dedupe(self):
+        models = planner_models(PROVIDERS["gemini"], "gemini-3.8-flash")
+        self.assertEqual(models[0], "gemini-3.8-flash")
+        self.assertEqual(len(models), len(set(models)))
+        self.assertIn("gemini-3.5-flash-lite", models)
+
+    def test_explicit_fallback_list_replaces_provider_default(self):
+        models = planner_models(PROVIDERS["gemini"], "a", "b,c")
+        self.assertEqual(models, ["a", "b", "c"])
+
+    def test_custom_provider_needs_base_url(self):
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(PlannerError, "base URL"):
+                build_transport(PROVIDERS["custom"])
+
+    def test_missing_key_names_the_env_var(self):
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(PlannerError, "GEMINI_API_KEY"):
+                asyncio.run(
+                    build_transport(PROVIDERS["gemini"], api_key="").complete([])
+                )
+
+
+class ProviderTransportErrorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_unknown_model_falls_through_to_the_next(self):
+        class Missing:
+            async def complete(self, messages, **kwargs):
+                raise PlannerError("Gemini HTTP 404: model not found")
+
+        class Working:
+            async def complete(self, messages, **kwargs):
+                return '{"steps":[{"op":"hold"}]}'
+
+        transport = ModelFallbackTransport([
+            ("retired/model", Missing()),
+            ("working/model", Working()),
+        ])
+        text = await transport.complete([{"role": "user", "content": "plan"}])
+
+        self.assertIn("steps", text)
+        self.assertEqual(transport.last_model, "working/model")
+
+    async def test_openrouter_transport_still_targets_openrouter(self):
+        transport = OpenRouterTransport(api_key="k", model=DEFAULT_MODEL)
+        self.assertEqual(transport._endpoint(), OPENROUTER_URL)
+        self.assertEqual(
+            transport._headers()["HTTP-Referer"],
+            "https://github.com/pranavvatlam-sudo/mindustry-ai-ship",
+        )
+
+    async def test_drops_extra_parameters_on_http_400(self):
+        calls: list[dict] = []
+
+        class Picky(OpenAICompatTransport):
+            def _post(self, body):
+                payload = json.loads(body)
+                calls.append(payload)
+                if "reasoning_effort" in payload:
+                    raise PlannerError("Gemini HTTP 400: unsupported parameter")
+                return '{"steps":[{"op":"hold"}]}'
+
+        transport = Picky(
+            api_key="k",
+            base_url=PROVIDERS["gemini"].base_url,
+            extra_payload=(("reasoning_effort", "low"),),
+        )
+        text = await transport.complete([{"role": "user", "content": "hi"}])
+
+        self.assertIn("steps", text)
+        self.assertEqual(len(calls), 2)
+        self.assertIn("reasoning_effort", calls[0])
+        self.assertNotIn("reasoning_effort", calls[1])
 
 
 if __name__ == "__main__":

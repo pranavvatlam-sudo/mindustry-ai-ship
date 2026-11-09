@@ -8,7 +8,8 @@ the game.
 
 Two planners are provided:
 
-* ``LLMPlanner`` asks an OpenRouter model for a JSON plan.
+* ``LLMPlanner`` asks an OpenAI-compatible chat model (Gemini by default, but
+  also Groq, OpenRouter, Ollama, or any custom endpoint) for a JSON plan.
 * ``HeuristicPlanner`` is a small offline fallback (nearest free ore → drill,
   a Duo nearby, or scout toward unexplored ground) used when no API key is set.
 
@@ -59,6 +60,106 @@ DEFAULT_FALLBACK_MODELS = ",".join([
     "liquid/lfm-3-1.7b:free",
     "recursive/flint-v1.0:free",
 ])
+
+
+@dataclass(frozen=True)
+class Provider:
+    """One OpenAI-compatible chat-completions backend.
+
+    Every provider here speaks ``POST {base_url}/chat/completions``, so only the
+    URL, the key environment variables and the default model list differ.
+    """
+
+    name: str
+    label: str
+    base_url: str
+    key_envs: tuple[str, ...]
+    default_model: str
+    fallback_models: tuple[str, ...] = ()
+    json_mode: bool = True
+    max_tokens: int = 1600
+    require_key: bool = True
+    # OpenRouter only: route to upstreams that actually honour response_format.
+    json_route_restriction: bool = False
+    extra_payload: tuple[tuple[str, Any], ...] = ()
+    extra_headers: tuple[tuple[str, str], ...] = ()
+
+
+# Newest stable Gemini text models first. Free-tier quotas differ per model, so
+# walking the list on a 429 is cheaper than giving up.
+GEMINI_MODELS = (
+    "gemini-3.8-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+)
+
+GROQ_MODELS = (
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+)
+
+PROVIDERS: dict[str, Provider] = {
+    "gemini": Provider(
+        name="gemini",
+        label="Gemini",
+        base_url="https://generativelanguage.googleapis.com/v1beta/openai",
+        key_envs=("GEMINI_API_KEY", "GOOGLE_API_KEY", "AI_API_KEY"),
+        default_model=GEMINI_MODELS[0],
+        fallback_models=GEMINI_MODELS,
+        max_tokens=4096,
+        # Gemini 3 models think before answering; a little effort is enough for
+        # a JSON plan and leaves the token budget for the answer itself.
+        extra_payload=(("reasoning_effort", "low"),),
+    ),
+    "groq": Provider(
+        name="groq",
+        label="Groq",
+        base_url="https://api.groq.com/openai/v1",
+        key_envs=("GROQ_API_KEY", "AI_API_KEY"),
+        default_model=GROQ_MODELS[0],
+        fallback_models=GROQ_MODELS,
+        max_tokens=2048,
+    ),
+    "openrouter": Provider(
+        name="openrouter",
+        label="OpenRouter",
+        base_url="https://openrouter.ai/api/v1",
+        key_envs=("OPENROUTER_API_KEY", "AI_API_KEY"),
+        default_model=DEFAULT_MODEL,
+        fallback_models=tuple(
+            name.strip() for name in DEFAULT_FALLBACK_MODELS.split(",") if name.strip()
+        ),
+        json_route_restriction=True,
+        extra_headers=(
+            ("HTTP-Referer", "https://github.com/pranavvatlam-sudo/mindustry-ai-ship"),
+            ("X-Title", "AI Ship"),
+        ),
+    ),
+    "ollama": Provider(
+        name="ollama",
+        label="Ollama",
+        base_url="http://localhost:11434/v1",
+        key_envs=("OLLAMA_API_KEY", "AI_API_KEY"),
+        default_model="qwen3:8b",
+        max_tokens=4096,
+        require_key=False,
+    ),
+    "custom": Provider(
+        name="custom",
+        label="custom provider",
+        base_url="",
+        key_envs=("AI_API_KEY",),
+        default_model="",
+        max_tokens=4096,
+        require_key=False,
+    ),
+}
+
+AI_PROVIDER_ENV = "AI_PROVIDER"
+AI_BASE_URL_ENV = "AI_BASE_URL"
+AI_MODEL_ENV = "AI_MODEL"
+AI_FALLBACK_ENV = "AI_FALLBACK_MODELS"
 
 # Mindustry block rotation, verified live with Building.front():
 #   0 = north (-y), 1 = south (+y), 2 = west (-x), 3 = east (+x)
@@ -131,8 +232,20 @@ class ChatTransport(Protocol):
     async def complete(self, messages: list[dict[str, str]], **kwargs: Any) -> str: ...
 
 
-class OpenRouterTransport:
-    """Minimal OpenRouter client using only the standard library.
+def first_env(names: Iterable[str]) -> str:
+    """Return the first non-empty environment variable from ``names``."""
+    for name in names:
+        value = os.environ.get(name)
+        if value and value.strip():
+            return value.strip()
+    return ""
+
+
+class OpenAICompatTransport:
+    """Minimal OpenAI-compatible chat client using only the standard library.
+
+    Gemini, Groq, OpenRouter, Ollama and most proxies expose the same
+    ``POST {base_url}/chat/completions`` shape, so one client covers them all.
 
     ``urllib`` is blocking, so the actual request runs in a worker thread; the
     event loop stays free to keep the bridge heartbeating.
@@ -142,47 +255,100 @@ class OpenRouterTransport:
         self,
         api_key: str | None = None,
         model: str = DEFAULT_MODEL,
+        base_url: str = OPENROUTER_URL,
         timeout: float = 90.0,
         temperature: float = 0.2,
         max_tokens: int = 1600,
         json_mode: bool = True,
+        label: str = "provider",
+        key_envs: tuple[str, ...] = ("AI_API_KEY",),
+        require_key: bool = True,
+        json_route_restriction: bool = False,
+        extra_payload: tuple[tuple[str, Any], ...] = (),
+        extra_headers: tuple[tuple[str, str], ...] = (),
+        reasoning_effort: str | None = None,
     ) -> None:
-        self.api_key = api_key or os.environ.get("OPENROUTER_API_KEY", "")
+        self.api_key = first_env(key_envs) if api_key is None else api_key
         self.model = model
+        self.base_url = base_url
         self.timeout = timeout
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.json_mode = json_mode
+        self.label = label
+        self.key_envs = key_envs
+        self.require_key = require_key
+        self.json_route_restriction = json_route_restriction
+        self.extra_payload = dict(extra_payload)
+        self.extra_headers = dict(extra_headers)
+        self.reasoning_effort = reasoning_effort
 
-    async def complete(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
-        if not self.api_key:
-            raise PlannerError(
-                "OPENROUTER_API_KEY is not set; use --heuristic or set the key"
-            )
+    def _endpoint(self) -> str:
+        url = self.base_url.rstrip("/")
+        if url.endswith("/chat/completions"):
+            return url
+        return url + "/chat/completions"
 
-        payload = {
+    def _payload(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        include_extra: bool = True,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
             "model": kwargs.get("model", self.model),
             "messages": messages,
             "temperature": kwargs.get("temperature", self.temperature),
             "max_tokens": kwargs.get("max_tokens", self.max_tokens),
         }
+        if include_extra:
+            payload.update(self.extra_payload)
         if kwargs.get("json_mode", self.json_mode):
             payload["response_format"] = {"type": "json_object"}
-            # only route to providers that actually honour response_format;
-            # otherwise some providers return free-form reasoning instead
-            payload["provider"] = {"require_parameters": True}
-        body = json.dumps(payload).encode("utf-8")
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://github.com/pranavvatlam-sudo/mindustry-ai-ship",
-            "X-Title": "AI Ship",
-        }
-        return await asyncio.to_thread(self._post, body, headers)
+            if self.json_route_restriction:
+                payload["provider"] = {"require_parameters": True}
+        effort = kwargs.get("reasoning_effort", self.reasoning_effort)
+        if effort:
+            payload["reasoning_effort"] = effort
+        return payload
 
-    def _post(self, body: bytes, headers: dict[str, str]) -> str:
+    def _headers(self) -> dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        headers.update(self.extra_headers)
+        return headers
+
+    async def complete(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
+        if self.require_key and not self.api_key:
+            names = ", ".join(self.key_envs) or "AI_API_KEY"
+            raise PlannerError(
+                f"{self.label} API key is not set; export one of {names} "
+                "or use --heuristic"
+            )
+
+        payload = self._payload(messages, **kwargs)
+        body = json.dumps(payload).encode("utf-8")
+        try:
+            return await asyncio.to_thread(self._post, body)
+        except PlannerError as exc:
+            # Some providers reject optional tuning parameters they do not
+            # know. Drop the extras once before giving up on this model.
+            if not self.extra_payload or "HTTP 400" not in str(exc):
+                raise
+            log.warning(
+                "%s rejected extra parameters (%s); retrying without them",
+                self.label,
+                exc,
+            )
+            payload = self._payload(messages, include_extra=False, **kwargs)
+            body = json.dumps(payload).encode("utf-8")
+            return await asyncio.to_thread(self._post, body)
+
+    def _post(self, body: bytes) -> str:
         request = urllib.request.Request(
-            OPENROUTER_URL, data=body, headers=headers, method="POST"
+            self._endpoint(), data=body, headers=self._headers(), method="POST"
         )
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
@@ -194,24 +360,42 @@ class OpenRouterTransport:
             except Exception:
                 pass
             raise PlannerError(
-                f"OpenRouter HTTP {exc.code}: {detail or exc.reason}"
+                f"{self.label} HTTP {exc.code}: {detail or exc.reason}"
             ) from exc
         except urllib.error.URLError as exc:
-            raise PlannerError(f"OpenRouter unreachable: {exc.reason}") from exc
+            raise PlannerError(f"{self.label} unreachable: {exc.reason}") from exc
         except (OSError, ValueError) as exc:
-            raise PlannerError(f"OpenRouter request failed: {exc}") from exc
+            raise PlannerError(f"{self.label} request failed: {exc}") from exc
 
-        return extract_content(data)
+        return extract_content(data, label=self.label)
 
 
-def extract_content(payload: dict[str, Any]) -> str:
-    """Pull the assistant text out of an OpenRouter response."""
+class OpenRouterTransport(OpenAICompatTransport):
+    """OpenRouter preset, kept so older callers keep working."""
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str = DEFAULT_MODEL,
+        **kwargs: Any,
+    ) -> None:
+        provider = PROVIDERS["openrouter"]
+        kwargs.setdefault("base_url", OPENROUTER_URL)
+        kwargs.setdefault("label", provider.label)
+        kwargs.setdefault("key_envs", provider.key_envs)
+        kwargs.setdefault("json_route_restriction", provider.json_route_restriction)
+        kwargs.setdefault("extra_headers", provider.extra_headers)
+        super().__init__(api_key=api_key, model=model, **kwargs)
+
+
+def extract_content(payload: dict[str, Any], label: str = "provider") -> str:
+    """Pull the assistant text out of a chat-completions response."""
     choices = payload.get("choices") or []
     if not choices:
         error = payload.get("error")
         if error:
-            raise PlannerError(f"OpenRouter error: {error}")
-        raise PlannerError("OpenRouter returned no choices")
+            raise PlannerError(f"{label} error: {error}")
+        raise PlannerError(f"{label} returned no choices")
     message = choices[0].get("message") or {}
     content = message.get("content")
     if isinstance(content, list):
@@ -227,7 +411,7 @@ def extract_content(payload: dict[str, Any]) -> str:
             content = reasoning
     if not content:
         raise PlannerError(
-            "OpenRouter returned an empty message "
+            f"{label} returned an empty message "
             f"(keys: {', '.join(sorted(message)) or 'none'})"
         )
     return str(content)
@@ -237,9 +421,14 @@ _RETRY_MARKERS = (
     "429",
     "rate-limited",
     "temporarily rate",
+    "resource_exhausted",
     "502",
     "503",
     "504",
+    "http 404",
+    "http 400",
+    "not found",
+    "unsupported",
     "unreachable",
     "timed out",
     "empty message",
@@ -249,9 +438,9 @@ _RETRY_MARKERS = (
 class ModelFallbackTransport:
     """Try a list of models in order when a provider is rate-limited.
 
-    OpenRouter's free models share upstream pools and are frequently 429'd.
-    Failed 429/5xx attempts do not count against the free daily quota, so
-    walking a short fallback list is cheap.
+    Free models share upstream pools and are frequently 429'd. Failed
+    429/5xx attempts do not count against the daily quota, so walking a short
+    fallback list is cheap.
     """
 
     def __init__(self, candidates: list[tuple[str, ChatTransport]]) -> None:
@@ -276,6 +465,109 @@ class ModelFallbackTransport:
             self.last_model = model
             return text
         raise PlannerError("all planner models failed: " + " | ".join(failures))
+
+
+# ---------------------------------------------------------------------- providers
+
+
+def resolve_provider(name: str | None = None) -> Provider:
+    """Pick a provider from ``name``/``AI_PROVIDER``, or infer it from the env."""
+    explicit = (name or os.environ.get(AI_PROVIDER_ENV, "")).strip().lower()
+    if explicit:
+        if explicit not in PROVIDERS:
+            raise PlannerError(
+                f"unknown provider {explicit!r}; choose one of "
+                + ", ".join(sorted(PROVIDERS))
+            )
+        return PROVIDERS[explicit]
+
+    if os.environ.get(AI_BASE_URL_ENV, "").strip():
+        return PROVIDERS["custom"]
+
+    for key, provider in (
+        ("GEMINI_API_KEY", PROVIDERS["gemini"]),
+        ("GOOGLE_API_KEY", PROVIDERS["gemini"]),
+        ("GROQ_API_KEY", PROVIDERS["groq"]),
+        ("OPENROUTER_API_KEY", PROVIDERS["openrouter"]),
+    ):
+        if os.environ.get(key, "").strip():
+            return provider
+
+    return PROVIDERS["openrouter"]
+
+
+def provider_api_key(provider: Provider) -> str:
+    return first_env(provider.key_envs)
+
+
+def provider_base_url(provider: Provider) -> str:
+    if provider.name == "custom":
+        return os.environ.get(AI_BASE_URL_ENV, "").strip()
+    return provider.base_url
+
+
+def planner_models(
+    provider: Provider,
+    model: str | None = None,
+    fallback_models: str | Iterable[str] | None = None,
+) -> list[str]:
+    """Return the ordered model list: primary first, then provider fallbacks."""
+    primary = (model or os.environ.get(AI_MODEL_ENV) or provider.default_model).strip()
+    if not primary:
+        raise PlannerError(
+            f"{provider.label} needs a model name; set {AI_MODEL_ENV} or pass --model"
+        )
+
+    names = [primary]
+    if fallback_models is None:
+        from_env = os.environ.get(AI_FALLBACK_ENV, "").strip()
+        extra: Iterable[str] = (
+            part.strip() for part in from_env.split(",")
+        ) if from_env else provider.fallback_models
+    elif isinstance(fallback_models, str):
+        extra = (part.strip() for part in fallback_models.split(","))
+    else:
+        extra = fallback_models
+
+    for name in extra:
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def build_transport(
+    provider: Provider,
+    *,
+    api_key: str | None = None,
+    model: str | None = None,
+    base_url: str | None = None,
+    json_mode: bool | None = None,
+    max_tokens: int | None = None,
+    reasoning_effort: str | None = None,
+    timeout: float = 90.0,
+) -> OpenAICompatTransport:
+    """Build a transport for ``provider`` from the environment and overrides."""
+    resolved_url = base_url or provider_base_url(provider)
+    if not resolved_url:
+        raise PlannerError(
+            f"{provider.label} needs a base URL; set {AI_BASE_URL_ENV} "
+            "or pass --base-url"
+        )
+    return OpenAICompatTransport(
+        api_key=provider_api_key(provider) if api_key is None else api_key,
+        model=model or os.environ.get(AI_MODEL_ENV) or provider.default_model,
+        base_url=resolved_url,
+        timeout=timeout,
+        max_tokens=max_tokens or provider.max_tokens,
+        json_mode=provider.json_mode if json_mode is None else json_mode,
+        label=provider.label,
+        key_envs=provider.key_envs,
+        require_key=provider.require_key,
+        json_route_restriction=provider.json_route_restriction,
+        extra_payload=provider.extra_payload,
+        extra_headers=provider.extra_headers,
+        reasoning_effort=reasoning_effort,
+    )
 
 
 # ------------------------------------------------------------------------ parsing
@@ -956,21 +1248,44 @@ async def _plan_and_maybe_run(
     if args.heuristic:
         plan = HeuristicPlanner(policy).plan(args.goal, memory)
     else:
-        api_key = os.environ.get("OPENROUTER_API_KEY", "")
-        if not api_key:
-            print("OPENROUTER_API_KEY is not set; falling back to --heuristic")
+        try:
+            provider = resolve_provider(args.provider)
+        except PlannerError as exc:
+            print(exc)
+            return 2
+
+        api_key = args.api_key or provider_api_key(provider)
+        if provider.require_key and not api_key:
+            print(
+                f"{provider.label} needs an API key: set "
+                + " or ".join(provider.key_envs)
+                + " (or pass --api-key)"
+            )
+            print("falling back to --heuristic")
             plan = HeuristicPlanner(policy).plan(args.goal, memory)
         else:
-            base = OpenRouterTransport(api_key=api_key, model=args.model,
-                                       json_mode=args.json_mode,
-                                       max_tokens=args.max_tokens)
-            models = [args.model]
-            if args.model_fallback:
-                for name in args.fallback_models.split(","):
-                    name = name.strip()
-                    if name and name not in models:
-                        models.append(name)
-            candidates = [(name, base) for name in models]
+            try:
+                transport = build_transport(
+                    provider,
+                    api_key=api_key,
+                    model=args.model,
+                    base_url=args.base_url,
+                    json_mode=args.json_mode,
+                    max_tokens=args.max_tokens,
+                    reasoning_effort=args.reasoning_effort,
+                )
+                models = planner_models(
+                    provider,
+                    args.model,
+                    args.fallback_models if args.model_fallback else (),
+                )
+            except PlannerError as exc:
+                print(f"planner setup failed: {exc}")
+                return 2
+
+            print(f"provider: {provider.label} ({provider_base_url(provider)})")
+            print("models:", ", ".join(models))
+            candidates = [(name, transport) for name in models]
             try:
                 if len(candidates) > 1:
                     plan = await FallbackPlanner(
@@ -979,7 +1294,7 @@ async def _plan_and_maybe_run(
                     ).plan(args.goal, memory)
                 else:
                     plan = await LLMPlanner(
-                        base, model=args.model, policy=policy,
+                        transport, model=models[0], policy=policy,
                         repair_attempts=args.repairs,
                     ).plan(args.goal, memory)
             except PlannerError as exc:
@@ -1024,6 +1339,30 @@ async def _main_async(args: argparse.Namespace) -> int:
     return await _plan_live(args)
 
 
+def provider_table() -> str:
+    """Human-readable summary of the built-in providers, for --list-providers."""
+    rows: list[str] = []
+    for name in sorted(PROVIDERS):
+        provider = PROVIDERS[name]
+        url = provider.base_url or f"(set {AI_BASE_URL_ENV})"
+        key = ", ".join(provider.key_envs) if provider.require_key else "not needed"
+        model = provider.default_model or f"(set {AI_MODEL_ENV})"
+        rows.append(f"{name}")
+        rows.append(f"  label:   {provider.label}")
+        rows.append(f"  url:     {url}")
+        rows.append(f"  key:     {key}")
+        rows.append(f"  model:   {model}")
+        if provider.fallback_models:
+            rows.append(f"  backups: {', '.join(provider.fallback_models)}")
+        rows.append("")
+    rows.append(
+        f"default: ${AI_PROVIDER_ENV} if set, else the first key found among "
+        "GEMINI_API_KEY, GOOGLE_API_KEY, GROQ_API_KEY, OPENROUTER_API_KEY "
+        f"(or `{AI_BASE_URL_ENV}` for a custom endpoint)"
+    )
+    return "\n".join(rows)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="M3 planner: turn a goal into validated executor steps"
@@ -1037,18 +1376,36 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--wait", type=float, default=120.0,
                         help="seconds to wait for the mod connection")
     parser.add_argument("--state", default=str(DEFAULT_STATE))
-    parser.add_argument("--model", default=os.environ.get("OPENROUTER_MODEL", DEFAULT_MODEL))
-    parser.add_argument("--fallback-models", default=DEFAULT_FALLBACK_MODELS,
-                        help="comma-separated models to try if the primary is rate-limited")
+    parser.add_argument("--provider", default=None,
+                        help="LLM backend: gemini, groq, openrouter, ollama, custom "
+                             "(default: $AI_PROVIDER, else inferred from the API key)")
+    parser.add_argument("--list-providers", action="store_true",
+                        help="print the built-in providers and exit")
+    parser.add_argument("--model", default=None,
+                        help="primary model (default: $%s or the provider default)"
+                             % AI_MODEL_ENV)
+    parser.add_argument("--fallback-models", default=None,
+                        help="comma-separated models to try if the primary is "
+                             "rate-limited (default: $%s or the provider default)"
+                             % AI_FALLBACK_ENV)
     parser.add_argument("--no-model-fallback", dest="model_fallback",
                         action="store_false", default=True,
                         help="use only --model")
+    parser.add_argument("--api-key", default=None,
+                        help="API key override; prefer the provider's env var")
+    parser.add_argument("--base-url", default=None,
+                        help="override the provider base URL (for custom endpoints)")
+    parser.add_argument("--reasoning-effort", default=None,
+                        help="pass reasoning_effort to the provider (minimal|low|medium|high)")
+    parser.add_argument("--json-mode", dest="json_mode", default=None,
+                        action="store_true",
+                        help="force response_format=json_object (default: provider)")
     parser.add_argument("--no-json-mode", dest="json_mode", action="store_false",
-                        default=True,
+                        default=None,
                         help="do not request response_format=json_object "
                              "(for models that reject it)")
-    parser.add_argument("--max-tokens", type=int, default=1600,
-                        help="max tokens for the planner reply")
+    parser.add_argument("--max-tokens", type=int, default=None,
+                        help="max tokens for the planner reply (default: provider)")
     parser.add_argument("--offline", action="store_true",
                         help="plan from saved memory; do not connect to the game")
     parser.add_argument("--heuristic", action="store_true",
@@ -1070,6 +1427,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--yes", action="store_true",
                         help="confirm live execution; spends real items")
     args = parser.parse_args(argv)
+
+    if args.list_providers:
+        print(provider_table())
+        return 0
 
     logging.basicConfig(level=logging.INFO,
                         format="%(levelname)s %(name)s: %(message)s")

@@ -24,9 +24,10 @@ vision and was visible is forgotten (mined or destroyed).
 Milestone **M2**: executor — done. It places blocks with real item costs, moves
 the ship into range, confirms each placement, and refuses to demolish own
 buildings or cores.
-Milestone **M3**: planner — done. An OpenRouter model (or a deterministic
-heuristic fallback) proposes a short plan; a strict validator rejects anything
-unsafe before the executor sees it. 65 unit tests pass.
+Milestone **M3**: planner — done. An LLM (Gemini by default, plus Groq,
+OpenRouter or local Ollama) or a deterministic heuristic fallback proposes a
+short plan; a strict validator rejects anything unsafe before the executor sees
+it. 81 unit tests pass.
 
 Next: **M4** dashboard and a full wave-10 Ground Zero run.
 
@@ -105,9 +106,45 @@ python -m ai_ship.planner --goal "Build a Duo turret near the ship, then hold"
 python -m ai_ship.planner --goal "..." --run --yes
 ```
 
-Set `OPENROUTER_API_KEY` to use a model. `OPENROUTER_MODEL` (or `--model`)
-selects it; `--fallback-models` tries alternatives when a free provider is
-rate-limited. The heuristic fallback works without a key or network.
+Set one API key and the planner picks the provider automatically. Any
+OpenAI-compatible endpoint works; `--list-providers` shows the built-ins:
+
+```powershell
+python -m ai_ship.planner --list-providers
+
+# Gemini free tier (primary recommendation)
+$env:GEMINI_API_KEY = "..."      # from https://aistudio.google.com/apikey
+$env:AI_PROVIDER = "gemini"      # optional; inferred from the key otherwise
+python -m ai_ship.planner --goal "Build a Duo turret near the ship, then hold"
+
+# swap providers without touching code
+$env:GROQ_API_KEY = "gsk_..."    # https://console.groq.com/keys
+python -m ai_ship.planner --provider groq --goal "..."
+```
+
+| Provider | Env key | Default model | Notes |
+| --- | --- | --- | --- |
+| `gemini` | `GEMINI_API_KEY` / `GOOGLE_API_KEY` | `gemini-3.8-flash` | Free tier, no card. Falls back through `gemini-3.6-flash`, `gemini-3.5-flash-lite`, `gemini-3.1-flash-lite`. |
+| `groq` | `GROQ_API_KEY` | `openai/gpt-oss-120b` | Free tier ~1,000 requests/day. |
+| `openrouter` | `OPENROUTER_API_KEY` | `google/gemma-4-31b-it:free` | 50 free requests/day; free models rate-limit often. |
+| `ollama` | none | `qwen3:8b` | Local `http://localhost:11434/v1`, unlimited. |
+| `custom` | `AI_API_KEY` | `AI_MODEL` | Set `AI_BASE_URL` to any `/v1` endpoint (Cloudflare, LM Studio, a proxy). |
+
+Provider selection order: `--provider`, then `$AI_PROVIDER`, then `$AI_BASE_URL`
+(custom), then the first key found among `GEMINI_API_KEY`, `GOOGLE_API_KEY`,
+`GROQ_API_KEY`, `OPENROUTER_API_KEY`; otherwise OpenRouter.
+
+`AI_MODEL` / `--model` sets the primary model, `AI_FALLBACK_MODELS` /
+`--fallback-models` the retry list, and `--no-model-fallback` uses only the
+primary. When the primary is rate-limited (429), missing (404), or returns prose
+instead of JSON, the planner walks the fallback list, then finally the offline
+heuristic. The heuristic works without a key or network.
+
+A 30-second smoke test of the whole chain, no game needed:
+
+```powershell
+python -m ai_ship.planner --offline --show-brief --goal "test"
+```
 
 Safety is enforced in code, not just in the prompt:
 
@@ -199,5 +236,5 @@ Helpers available to `eval` inside the mod:
 1. ~~**M0** link, snapshot, ship spawned and steerable~~ — done
 2. ~~**M1** perception memory (explored grid), live watch, unit tests~~ — done
 3. ~~**M2** executor: drills → conveyors → core, Duo nests with ammo~~ — done, including a live paid build in Ground Zero
-4. ~~**M3** planner: LLM goals, validated actions~~ — done; live calls depend on the OpenRouter free-tier quota, with an offline heuristic fallback
+4. ~~**M3** planner: LLM goals, validated actions~~ — done; provider-agnostic OpenAI-compatible transport (Gemini, Groq, OpenRouter, Ollama, custom), with a deterministic fallback
 5. **M4** dashboard, wave-10 Ground Zero run
