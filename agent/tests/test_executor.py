@@ -177,6 +177,48 @@ class BuildTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(res.ok)
         self.assertIn(("eval", {"code": 'setPaused(true)'}), bridge.calls)
 
+    async def test_break_refuses_own_building(self):
+        snap = snapshot_with_ship(1024.0, 1024.0)
+        snap["blocks"] = [{"b": "conveyor", "x": 128, "y": 128, "team": 1, "rot": 0}]
+        exec_, bridge = make_exec(snapshot=snap)
+
+        res = await exec_.break_at(128, 128)
+
+        self.assertFalse(res.ok)
+        self.assertIn("own building", res.error)
+        codes = [kw["code"] for op, kw in bridge.calls if op == "eval"]
+        self.assertFalse(any("breakAt" in c for c in codes))
+
+    async def test_break_refuses_core(self):
+        snap = snapshot_with_ship(1024.0, 1024.0)
+        snap["blocks"] = [{"b": "core-shard", "x": 128, "y": 128, "team": 1, "rot": 0}]
+        exec_, bridge = make_exec(snapshot=snap)
+
+        res = await exec_.break_at(128, 128)
+
+        self.assertFalse(res.ok)
+        self.assertIn("core", res.error)
+
+    async def test_break_allows_enemy_building(self):
+        snap = snapshot_with_ship(1024.0, 1024.0)
+        snap["blocks"] = [{"b": "conveyor", "x": 128, "y": 128, "team": 2, "rot": 0}]
+        exec_, bridge = make_exec(snapshot=snap)
+
+        res = await exec_.break_at(128, 128)
+
+        self.assertTrue(res.ok)
+
+    async def test_break_force_allows_own_building(self):
+        snap = snapshot_with_ship(1024.0, 1024.0)
+        snap["blocks"] = [{"b": "conveyor", "x": 128, "y": 128, "team": 1, "rot": 0}]
+        exec_, bridge = make_exec(snapshot=snap)
+
+        res = await exec_.break_at(128, 128, force=True)
+
+        self.assertTrue(res.ok)
+        codes = [kw["code"] for op, kw in bridge.calls if op == "eval"]
+        self.assertTrue(any("breakAt" in c for c in codes))
+
 
 if __name__ == "__main__":
     unittest.main()

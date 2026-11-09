@@ -44,6 +44,7 @@ class BuildStep:
     x: float | None = None
     y: float | None = None
     paused: bool | None = None
+    force: bool = False
     # how long to wait for the ship to reach a move target (seconds)
     timeout: float = 30.0
 
@@ -197,8 +198,26 @@ class Executor:
                           ship=self.memory.ship,
                           error=None)
 
-    async def break_at(self, tx: int, ty: int) -> StepResult:
-        """Clear tile (tx, ty)."""
+    async def break_at(self, tx: int, ty: int, force: bool = False) -> StepResult:
+        """Clear tile (tx, ty).
+
+        Safety interlock: the executor refuses to demolish the player's own
+        buildings (or any core) unless ``force`` is explicitly set. The planner
+        cannot accidentally delete the base the user built.
+        """
+        await self._snap()  # make sure memory is current before the safety check
+        known = self.memory.blocks.get((tx, ty))
+        if known is not None:
+            if "core" in known.block:
+                return StepResult(op="break", ok=False,
+                                  error=f"refusing to break a core at {tx},{ty}",
+                                  ship=self.memory.ship)
+            own_team = self.memory.team
+            if not force and own_team is not None and known.team == own_team:
+                return StepResult(op="break", ok=False,
+                                  error=f"refusing to break own building {known.block} at {tx},{ty}",
+                                  ship=self.memory.ship)
+
         try:
             ok = await self._eval(f"breakAt({tx}, {ty})")
         except BridgeError as exc:
@@ -237,7 +256,7 @@ class Executor:
                 res = await self.build(step.block, step.tx, step.ty, step.rot)
             elif step.op == "break":
                 assert step.tx is not None and step.ty is not None
-                res = await self.break_at(step.tx, step.ty)
+                res = await self.break_at(step.tx, step.ty, step.force)
             elif step.op == "move":
                 assert step.x is not None and step.y is not None
                 res = await self.move_to(step.x, step.y, step.timeout)
