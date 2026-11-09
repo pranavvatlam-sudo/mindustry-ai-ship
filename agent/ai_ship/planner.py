@@ -161,6 +161,31 @@ AI_BASE_URL_ENV = "AI_BASE_URL"
 AI_MODEL_ENV = "AI_MODEL"
 AI_FALLBACK_ENV = "AI_FALLBACK_MODELS"
 
+
+def load_dotenv(paths: Iterable[Path] | None = None) -> None:
+    """Load ``KEY=VALUE`` pairs from .env files, never overriding real env vars.
+
+    Defaults to ``<repo>/.env`` and ``<repo>/agent/.env``. Keeping the key in a
+    git-ignored file means it never has to be pasted into a chat or a command.
+    """
+    if paths is None:
+        root = Path(__file__).resolve().parent.parent.parent
+        paths = (root / ".env", root / "agent" / ".env")
+    for path in paths:
+        try:
+            text = Path(path).read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip("'\"")
+            if key and key not in os.environ:
+                os.environ[key] = value
+
 # Mindustry block rotation, verified live with Building.front():
 #   0 = north (-y), 1 = south (+y), 2 = west (-x), 3 = east (+x)
 ROTATION_NAMES = {0: "north", 1: "south", 2: "west", 3: "east"}
@@ -1364,6 +1389,7 @@ def provider_table() -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    load_dotenv()
     parser = argparse.ArgumentParser(
         description="M3 planner: turn a goal into validated executor steps"
     )

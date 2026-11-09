@@ -140,6 +140,15 @@ primary. When the primary is rate-limited (429), missing (404), or returns prose
 instead of JSON, the planner walks the fallback list, then finally the offline
 heuristic. The heuristic works without a key or network.
 
+The planner also reads `.env` in the repo root or `agent/` (git-ignored), so the
+key never has to go into a command line or chat. Copy `.env.example` to `.env`
+and fill in `GEMINI_API_KEY`:
+
+```powershell
+Copy-Item .env.example .env
+notepad .env
+```
+
 A 30-second smoke test of the whole chain, no game needed:
 
 ```powershell

@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from ai_ship.memory import WorldMemory
@@ -26,6 +28,7 @@ from ai_ship.planner import (
     Policy,
     build_transport,
     extract_content,
+    load_dotenv,
     parse_plan_json,
     planner_models,
     resolve_provider,
@@ -499,6 +502,24 @@ class ProviderTests(unittest.TestCase):
                 asyncio.run(
                     build_transport(PROVIDERS["gemini"], api_key="").complete([])
                 )
+
+
+class DotenvTests(unittest.TestCase):
+    def test_loads_values_without_overriding_real_env(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".env"
+            path.write_text(
+                "# my keys\nGEMINI_API_KEY=abc123\nAI_PROVIDER='gemini'\n\n",
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {"AI_PROVIDER": "preset"}, clear=True):
+                load_dotenv([path])
+                self.assertEqual(os.environ["GEMINI_API_KEY"], "abc123")
+                # a real environment variable always wins
+                self.assertEqual(os.environ["AI_PROVIDER"], "preset")
+
+    def test_missing_file_is_ignored(self):
+        load_dotenv([Path(tempfile.gettempdir()) / "definitely-not-here.env"])
 
 
 class ProviderTransportErrorTests(unittest.IsolatedAsyncioTestCase):
