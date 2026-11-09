@@ -17,8 +17,13 @@ Mindustry (Google Play Games Android VM)
 
 ## Current status
 
-Milestone **M0**: link, snapshot, eval. The ship spawns next to your core,
-reports only what its sensors can see, and can be steered.
+Milestone **M0**: link, snapshot, eval — done.
+Milestone **M1**: perception memory — done. The agent accumulates ore tiles, blocks,
+enemy tracks, and explored tiles from vision snapshots; anything that leaves
+vision and was visible is forgotten (mined or destroyed). 16 unit tests pass.
+
+Next: **M2** executor — drills → conveyors → core, Duo nests with ammo, paying real
+item costs.
 
 It auto-spawns only in **Ground Zero** (`sector.preset.name == "groundZero"`), so
 loading your other sectors does not add modded units to them. Anywhere else, the
@@ -35,6 +40,9 @@ icon.png               mod icon
 tools/make_sprites.py  regenerates the sprites
 agent/ai_ship/rpc.py   JSON-lines bridge (server side)
 agent/ai_ship/probe.py M0 probe CLI
+agent/ai_ship/memory.py M1 perception memory + live watch
+agent/ai_ship/executor.py M2 build/drill/conveyor executor
+agent/tests/           unit tests
 ```
 
 ## Install in the game
@@ -70,6 +78,8 @@ python -m ai_ship.probe --backup            # copy saves/ before touching a sect
 python -m ai_ship.probe --spawn             # spawn the ship in the current game
 python -m ai_ship.probe --eval "Vars.state.wave"
 python -m ai_ship.probe --chat "AI Ship online"
+python -m ai_ship.memory              # accumulate perception memory from snapshots (Ctrl+C to stop)
+python -m ai_ship.memory --once       # take one snapshot, save memory, and exit
 ```
 
 The flags can be combined, e.g. `--backup --spawn`.
@@ -145,8 +155,8 @@ Helpers available to `eval` inside the mod:
 
 ## Roadmap
 
-1. **M0** link, snapshot, ship spawned and steerable
-2. **M1** perception memory (explored grid), RPC client, save guard
-3. **M2** executor: drills → conveyors → core, Duo nests with ammo
+1. ~~**M0** link, snapshot, ship spawned and steerable~~ — done
+2. ~~**M1** perception memory (explored grid), live watch, unit tests~~ — done
+3. ~~**M2** executor: drills → conveyors → core, Duo nests with ammo~~ — code complete, unit-tested, read-only live smoke test passed; live placements pending your go-ahead (they spend real items)
 4. **M3** planner: LLM goals, validated actions
 5. **M4** dashboard, wave-10 Ground Zero run
