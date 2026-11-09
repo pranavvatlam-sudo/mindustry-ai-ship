@@ -18,6 +18,7 @@ saves/
 *.msav
 *.msav.bak
 snapshots/
+agent/state/
 
 # Editors / OS
 .vscode/
