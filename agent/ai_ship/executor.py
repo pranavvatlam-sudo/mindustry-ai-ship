@@ -343,10 +343,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--state", default=str(Path(__file__).resolve().parent.parent / "state" / "world-memory.json"))
     parser.add_argument("--reset", action="store_true", help="start from empty memory")
     parser.add_argument("--once", action="store_true", help="snapshot once, print summary, exit")
-    group = parser.add_mutually_exclusive_group(required=True)
+    group = parser.add_mutually_exclusive_group()
     group.add_argument("--plan", help="JSON file with a list of build steps")
     group.add_argument("--steps", help="JSON string with a list of build steps")
     args = parser.parse_args(argv)
+
+    if not args.once and not args.plan and not args.steps:
+        parser.error("one of --plan/--steps is required unless --once is given")
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     try:
